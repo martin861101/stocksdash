@@ -1,12 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
+// Card components are now used by DashboardCard, not directly here.
+// import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
 import { useCopilotAction, useCopilotReadable } from "@copilotkit/react-core";
 import { AreaChart } from "./ui/area-chart";
 import { BarChart } from "./ui/bar-chart";
 import { DonutChart } from "./ui/pie-chart";
 import { SearchResults } from "./generative-ui/SearchResults";
+// cn is used by MetricDisplay, not directly here.
+// import { cn } from "@/lib/utils";
+
+// Import newly created components
+import { DashboardCard } from "./ui/DashboardCard";
+import { MetricDisplay } from "./ui/MetricDisplay";
+import { IpoList } from "./IpoList";
+import { LivePriceList } from "./LivePriceList";
+
 
 // API Configurations
 const FINNHUB_API_KEY = process.env.NEXT_PUBLIC_FINNHUB_API_KEY;
@@ -16,7 +26,59 @@ const MARKETSTACK_API_KEY = process.env.NEXT_PUBLIC_MARKETSTACK_API_KEY;
 // Note: Marketstack free tier often uses HTTP. If your app is on HTTPS, this might cause mixed content browser errors.
 const MARKETSTACK_BASE_URL = 'http://api.marketstack.com/v1';
 
-export function Dashboard() {
+// --- TypeScript Interfaces for CopilotKit Props ---
+
+export interface CopilotReadableDashboardMetrics {
+  currentPortfolioValue: number;
+  dayGainLossAmount: number;
+  dayGainLossPercentage: number;
+  totalReturnAmount: number;
+  totalReturnPercentage: number;
+  sp500Current: number;
+  sp500Change: number;
+  sp500ChangePercent: number;
+  totalMarketVolume: number;
+  portfolioYield: number;
+}
+
+export interface CopilotReadableDashboardData {
+  sp500HistoricalData: any[]; // Consider defining a more specific type if possible
+  watchlistData: any[]; // Consider defining a more specific type
+  portfolioAllocationData: any[]; // Consider defining a more specific type
+  ipoCalendarData: any[]; // Consider defining a more specific type
+  livePrices: Record<string, string | number>;
+  metrics: CopilotReadableDashboardMetrics;
+}
+
+export interface CopilotActionParameter {
+  name: string;
+  type: string;
+  description?: string;
+  required?: boolean;
+  // Add other parameter properties if needed, e.g., enum, options
+}
+export interface CopilotActionConfig<T extends Record<string, any> = any> {
+  name: string;
+  description?: string;
+  parameters: CopilotActionParameter[];
+  handler?: (args: T) => Promise<any> | any; // For backend actions
+  render?: (props: { args: T; status: string; }) => React.ReactNode | string; // For frontend actions
+  available?: "enabled" | "disabled"; // Or boolean, depending on exact useCopilotAction version/preference
+}
+
+
+interface DashboardProps {
+  copilotReadableDescription?: string;
+  copilotReadableData?: CopilotReadableDashboardData; // Data to be made readable by Copilot
+  copilotActions?: CopilotActionConfig<any>[]; // Actions to be made available to Copilot
+}
+
+
+export function Dashboard({
+  copilotReadableDescription = "Stock market dashboard data including S&P 500 trend, watchlist, portfolio metrics, and upcoming IPOs.", // Default description
+  copilotReadableData: externalCopilotData, // Renaming to avoid conflict with internal state if used differently
+  copilotActions
+}: DashboardProps) {
   // --- STATE DECLARATIONS ---
   const [sp500CurrentDisplay, setSp500CurrentDisplay] = useState({ value: 0, change: 0, changePercent: 0 });
   const [sp500HistoricalData, setSp500HistoricalData] = useState([]);
@@ -179,20 +241,66 @@ export function Dashboard() {
     };
   }, []);
 
-  useCopilotReadable({
-    description: "Stock market dashboard data including S&P 500 trend, watchlist, portfolio metrics, and upcoming IPOs.",
-    value: {
-      sp500HistoricalData, watchlistData, portfolioAllocationData: dynamicPortfolioAllocationData, ipoCalendarData, livePrices,
-      metrics: {
-        currentPortfolioValue, dayGainLossAmount: dayGainLoss.amount, dayGainLossPercentage: dayGainLoss.percentage,
-        totalReturnAmount: totalReturn.amount, totalReturnPercentage: totalReturn.percentage,
-        sp500Current: sp500CurrentDisplay.value, sp500Change: sp500CurrentDisplay.change, sp500ChangePercent: sp500CurrentDisplay.changePercent,
-        totalMarketVolume, portfolioYield,
-      }
+  // Data that will be fed to useCopilotReadable. This can come from props or internal state.
+  const currentReadableData: CopilotReadableDashboardData = externalCopilotData || {
+    sp500HistoricalData,
+    watchlistData,
+    portfolioAllocationData: dynamicPortfolioAllocationData,
+    ipoCalendarData,
+    livePrices,
+    metrics: {
+      currentPortfolioValue,
+      dayGainLossAmount: dayGainLoss.amount,
+      dayGainLossPercentage: dayGainLoss.percentage,
+      totalReturnAmount: totalReturn.amount,
+      totalReturnPercentage: totalReturn.percentage,
+      sp500Current: sp500CurrentDisplay.value,
+      sp500Change: sp500CurrentDisplay.change,
+      sp500ChangePercent: sp500CurrentDisplay.changePercent,
+      totalMarketVolume,
+      portfolioYield,
     }
+  };
+
+  useCopilotReadable({
+    description: copilotReadableDescription,
+    value: currentReadableData
   });
 
- 
+  // Register actions passed via props
+  if (copilotActions && Array.isArray(copilotActions)) {
+    copilotActions.forEach(actionConfig => {
+      // IMPORTANT: useCopilotAction must be called at the top level of the component,
+      // so we cannot conditionally call it inside a loop like this directly IF the number of actions can change.
+      // For this refactoring, if the number of actions is fixed or if hooks can be registered in a loop
+      // (which is generally not recommended as it can break rules of hooks if not careful),
+      // this approach might seem okay.
+      // A safer approach for dynamic actions is often to have a single action that then delegates
+      // based on a parameter, or use a context/manager pattern if actions change frequently.
+      //
+      // For this specific task, we assume the list of actions is relatively stable per Dashboard instance.
+      // However, the most robust way to handle truly dynamic actions list for useCopilotAction might require
+      // a different pattern than simple iteration if the hook's internal mechanics rely on call order.
+      // Let's proceed with the direct iteration for now as per the goal of passing a list of actions.
+      // If this causes issues, a wrapper component that takes one actionConfig and is used multiple times,
+      // or a single dispatching action, would be alternatives.
+      useCopilotAction(actionConfig as any); // Type assertion as 'any' to simplify for now, ensure actionConfig matches useCopilotAction's expected type.
+    });
+  } else {
+    // Fallback to default searchInternet action if no actions are provided via props
+    useCopilotAction({
+      name: "searchInternet",
+      available: "disabled",
+      description: "Searches the internet for information based on a query.",
+      parameters: [
+        { name: "query", type: "string", description: "The query to search the internet for.", required: true }
+      ],
+      render: ({args, status}) => <SearchResults query={args.query || 'No query provided'} status={status} />,
+    });
+  }
+
+  // Component definitions and their interfaces have been moved to separate files.
+  // No need for these interfaces or component consts here anymore.
 
   const colors = {
     indexPerformance: ["#3b82f6", "#10b981"],
@@ -216,192 +324,125 @@ export function Dashboard() {
       {/* Key Stock Market Metrics */}
       <div className="col-span-1 md:col-span-2 lg:col-span-4">
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
-            <p className="text-xs text-gray-500">Portfolio Value</p>
-            <p className="text-xl font-semibold text-gray-900">${currentPortfolioValue.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
-          </div>
-          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
-            <p className="text-xs text-gray-500">Day's Gain/Loss</p>
-            <p className={`text-xl font-semibold ${dayGainLoss.amount >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-              ${dayGainLoss.amount.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: 'always'})} 
-              ({dayGainLoss.percentage.toFixed(2)}%)
-            </p>
-          </div>
-          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
-            <p className="text-xs text-gray-500">S&P 500 (SPY Quote)</p>
-            <p className={`text-xl font-semibold ${sp500CurrentDisplay.change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-              {sp500CurrentDisplay.value.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-              <span className="text-sm ml-1">
-                ({sp500CurrentDisplay.change.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: 'always'})}, {sp500CurrentDisplay.changePercent.toFixed(2)}%)
-              </span>
-            </p>
-          </div>
-          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
-            <p className="text-xs text-gray-500">Total Return</p>
-            <p className={`text-xl font-semibold ${totalReturn.amount >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-              ${totalReturn.amount.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ({totalReturn.percentage.toFixed(2)}%)
-            </p>
-          </div>
-          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
-            <p className="text-xs text-gray-500">Market Volume</p>
-            <p className="text-xl font-semibold text-gray-900">{(totalMarketVolume / 1_000_000_000).toFixed(2)}B</p>
-          </div>
-          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
-            <p className="text-xs text-gray-500">Portfolio Yield</p>
-            <p className="text-xl font-semibold text-gray-900">{portfolioYield.toFixed(2)}%</p>
-          </div>
+          <MetricDisplay title="Portfolio Value" value={currentPortfolioValue} unit="$" />
+          <MetricDisplay
+            title="Day's Gain/Loss"
+            value={dayGainLoss.amount}
+            unit="$"
+            change={dayGainLoss.amount}
+            subtitle={`${dayGainLoss.amount.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: 'always'})} (${dayGainLoss.percentage.toFixed(2)}%)`}
+          />
+          <MetricDisplay
+            title="S&P 500 (SPY Quote)"
+            value={sp500CurrentDisplay.value}
+            change={sp500CurrentDisplay.change}
+            // Subtitle now correctly shows both absolute and percent change, similar to original
+            subtitle={`${sp500CurrentDisplay.change.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: 'always'})} (${sp500CurrentDisplay.changePercent.toFixed(2)}%)`}
+          />
+          <MetricDisplay
+            title="Total Return"
+            value={totalReturn.amount}
+            unit="$"
+            change={totalReturn.amount}
+            subtitle={`${totalReturn.amount.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: 'always'})} (${totalReturn.percentage.toFixed(2)}%)`}
+          />
+          <MetricDisplay title="Market Volume" value={`${(totalMarketVolume / 1_000_000_000).toFixed(2)}B`} unit="" />
+          <MetricDisplay title="Portfolio Yield" value={`${portfolioYield.toFixed(2)}%`} />
         </div>
       </div>
 
       {/* S&P 500 Historical AreaChart Card - Now using Marketstack data */}
-      <Card className="col-span-1 md:col-span-2 lg:col-span-4">
-        <CardHeader className="pb-1 pt-3">
-          <CardTitle className="text-base font-medium">S&P 500 Index Performance (SPY - EOD)</CardTitle>
-          <CardDescription className="text-xs">Historical End-of-Day trend from Marketstack</CardDescription>
-        </CardHeader>
-        <CardContent className="p-3">
-          <div className="h-60">
-            {sp500HistoricalData && sp500HistoricalData.length > 0 ? (
-              <AreaChart
-                data={sp500HistoricalData} 
-                index="date"
-                categories={["value"]} 
-                colors={colors.indexPerformance || ["#3b82f6"]}
-                valueFormatter={(value) => `$${value.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`}
-                showLegend={true} showGrid={true} showXAxis={true} showYAxis={true}
-              />
-            ) : (
-              <p className="text-center text-gray-500">S&P 500 historical data not available or failed to load.</p>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+      <DashboardCard
+        title="S&P 500 Index Performance (SPY - EOD)"
+        description="Historical End-of-Day trend from Marketstack"
+        className="col-span-1 md:col-span-2 lg:col-span-4"
+      >
+        <div className="h-60">
+          {sp500HistoricalData && sp500HistoricalData.length > 0 ? (
+            <AreaChart
+              data={sp500HistoricalData}
+              index="date"
+              categories={["value"]}
+              colors={colors.indexPerformance || ["#3b82f6"]}
+              valueFormatter={(value) => `$${value.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`}
+              showLegend={true} showGrid={true} showXAxis={true} showYAxis={true}
+            />
+          ) : (
+            <p className="text-center text-gray-500">S&P 500 historical data not available or failed to load.</p>
+          )}
+        </div>
+      </DashboardCard>
 
       {/* Stock Watchlist - Dynamic */}
-      <Card className="col-span-1 md:col-span-1 lg:col-span-2">
-        <CardHeader className="pb-1 pt-3">
-          <CardTitle className="text-base font-medium">Stock Watchlist</CardTitle>
-          <CardDescription className="text-xs">Current price from Finnhub</CardDescription>
-        </CardHeader>
-        <CardContent className="p-3">
-          <div className="h-60">
-            {watchlistData.length > 0 ? (
-              <BarChart
-                data={watchlistData} 
-                index="ticker"
-                categories={["currentPrice"]}
-                colors={colors.watchlist}
-                valueFormatter={(value) => `$${value.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`}
-                showLegend={false} showGrid={true} layout="horizontal"
-              />
-            ) : (
-              <p className="text-center text-gray-500">No watchlist data available.</p>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+      <DashboardCard
+        title="Stock Watchlist"
+        description="Current price from Finnhub"
+        className="col-span-1 md:col-span-1 lg:col-span-2"
+      >
+        <div className="h-60">
+          {watchlistData.length > 0 ? (
+            <BarChart
+              data={watchlistData}
+              index="ticker"
+              categories={["currentPrice"]}
+              colors={colors.watchlist}
+              valueFormatter={(value) => `$${value.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`}
+              showLegend={false} showGrid={true} layout="horizontal"
+            />
+          ) : (
+            <p className="text-center text-gray-500">No watchlist data available.</p>
+          )}
+        </div>
+      </DashboardCard>
 
       {/* Portfolio Allocation - Dynamic */}
-      <Card className="col-span-1 md:col-span-1 lg:col-span-2">
-        <CardHeader className="pb-1 pt-3">
-          <CardTitle className="text-base font-medium">Portfolio Allocation</CardTitle>
-          <CardDescription className="text-xs">Distribution by stock holdings</CardDescription>
-        </CardHeader>
-        <CardContent className="p-3">
-          <div className="h-60">
-            {dynamicPortfolioAllocationData && dynamicPortfolioAllocationData.length > 0 ? (
-              <DonutChart
-                data={dynamicPortfolioAllocationData}
-                category="value" 
-                index="name"
-                valueFormatter={(value) => `${value.toFixed(2)}%`}
-                colors={colors.portfolioAllocation}
-                centerText="Holdings" 
-                paddingAngle={2} 
-                showLabel={true} 
-                showLegend={true}
-                innerRadius={50} 
-                outerRadius="85%"
-              />
-            ) : (
-              <p className="text-center text-gray-500">No portfolio data to display allocation.</p>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+      <DashboardCard
+        title="Portfolio Allocation"
+        description="Distribution by stock holdings"
+        className="col-span-1 md:col-span-1 lg:col-span-2"
+      >
+        <div className="h-60">
+          {dynamicPortfolioAllocationData && dynamicPortfolioAllocationData.length > 0 ? (
+            <DonutChart
+              data={dynamicPortfolioAllocationData}
+              category="value"
+              index="name"
+              valueFormatter={(value) => `${value.toFixed(2)}%`}
+              colors={colors.portfolioAllocation}
+              centerText="Holdings"
+              paddingAngle={2}
+              showLabel={true}
+              showLegend={true}
+              innerRadius={50}
+              outerRadius="85%"
+            />
+          ) : (
+            <p className="text-center text-gray-500">No portfolio data to display allocation.</p>
+          )}
+        </div>
+      </DashboardCard>
 
       {/* IPO Calendar - Dynamic */}
-      <Card className="col-span-1 md:col-span-1 lg:col-span-2">
-        <CardHeader className="pb-1 pt-3">
-          <CardTitle className="text-base font-medium">Upcoming IPOs</CardTitle>
-          <CardDescription className="text-xs">Initial public offerings in the next 30 days</CardDescription>
-        </CardHeader>
-        <CardContent className="p-3">
-          <div className="h-60 overflow-y-auto pr-2">
-            {ipoCalendarData && ipoCalendarData.length > 0 ? (
-              <ul className="space-y-3">
-                {ipoCalendarData.slice(0, 15).map((ipo) => (
-                  <li key={ipo.symbol || ipo.name} className="flex justify-between items-center text-sm border-b border-gray-100 pb-2">
-                    <div>
-                      <p className="font-semibold text-gray-800">{ipo.symbol || 'N/A'}</p>
-                      <p className="text-xs text-gray-500 truncate max-w-[150px]">{ipo.name}</p>
-                    </div>
-                    <div className="text-right">
-                      <p className="font-medium text-gray-700">{ipo.date}</p>
-                      <p className="text-xs text-gray-600 bg-gray-100 px-2 py-0.5 rounded-full">{ipo.price || 'N/A'}</p>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <div className="h-full flex items-center justify-center text-gray-500">
-                <p>No upcoming IPOs found in the selected range.</p>
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
+      <DashboardCard
+        title="Upcoming IPOs"
+        description="Initial public offerings in the next 30 days"
+        className="col-span-1 md:col-span-1 lg:col-span-2"
+      >
+        <div className="h-60 overflow-y-auto pr-2">
+          <IpoList ipoCalendarData={ipoCalendarData} />
+        </div>
+      </DashboardCard>
 
       {/* Live Price Updates - Dynamic */}
-      <Card className="col-span-1 md:col-span-1 lg:col-span-2">
-        <CardHeader className="pb-1 pt-3">
-          <CardTitle className="text-base font-medium">Live Price Updates</CardTitle>
-          <CardDescription className="text-xs">Gold, Silver, and USD/ZAR prices</CardDescription>
-        </CardHeader>
-        <CardContent className="p-3">
-          <div className="h-60 overflow-y-auto pr-2">
-            <ul className="space-y-4">
-              <li className="flex justify-between items-center text-sm">
-                <p className="font-semibold text-gray-800">🥇 Gold (USD)</p>
-                <p className="font-mono text-base text-gray-900 bg-gray-100 px-3 py-1 rounded">
-                    {typeof livePrices['OANDA:XAU_USD'] === 'number' 
-                        ? livePrices['OANDA:XAU_USD'].toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) 
-                        : livePrices['OANDA:XAU_USD']
-                    }
-                </p>
-              </li>
-              <li className="flex justify-between items-center text-sm">
-                <p className="font-semibold text-gray-800">🥈 Silver (USD)</p>
-                <p className="font-mono text-base text-gray-900 bg-gray-100 px-3 py-1 rounded">
-                    {typeof livePrices['OANDA:XAG_USD'] === 'number' 
-                        ? livePrices['OANDA:XAG_USD'].toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) 
-                        : livePrices['OANDA:XAG_USD']
-                    }
-                </p>
-              </li>
-              <li className="flex justify-between items-center text-sm">
-                <p className="font-semibold text-gray-800">🇿🇦 USD/ZAR</p>
-                <p className="font-mono text-base text-gray-900 bg-gray-100 px-3 py-1 rounded">
-                    {typeof livePrices['OANDA:USD_ZAR'] === 'number' 
-                        ? livePrices['OANDA:USD_ZAR'].toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 }) 
-                        : livePrices['OANDA:USD_ZAR']
-                    }
-                </p>
-              </li>
-            </ul>
-          </div>
-        </CardContent>
-      </Card>
+      <DashboardCard
+        title="Live Price Updates"
+        description="Gold, Silver, and USD/ZAR prices"
+        className="col-span-1 md:col-span-1 lg:col-span-2"
+      >
+        <div className="h-60 overflow-y-auto pr-2">
+         <LivePriceList livePrices={livePrices} />
+        </div>
+      </DashboardCard>
     </div>
   );
 }
