@@ -1,0 +1,407 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./ui/card";
+import { useCopilotAction, useCopilotReadable } from "@copilotkit/react-core";
+import { AreaChart } from "./ui/area-chart"; // Re-added for S&P 500 historical chart
+import { BarChart } from "./ui/bar-chart";
+import { DonutChart } from "./ui/pie-chart";
+import { SearchResults } from "./generative-ui/SearchResults";
+
+// API Configurations
+const FINNHUB_API_KEY = process.env.NEXT_PUBLIC_FINNHUB_API_KEY;
+const FINNHUB_BASE_URL = 'https://finnhub.io/api/v1';
+
+const MARKETSTACK_API_KEY = process.env.NEXT_PUBLIC_MARKETSTACK_API_KEY;
+// Note: Marketstack free tier often uses HTTP. If your app is HTTPS, this might cause mixed content issues.
+// You might need a proxy or check if Marketstack offers HTTPS on your plan.
+const MARKETSTACK_BASE_URL = 'http://api.marketstack.com/v1';
+
+export function Dashboard() {
+  // State for SPY metric card (from Finnhub)
+  const [sp500CurrentDisplay, setSp500CurrentDisplay] = useState({ value: 0, change: 0, changePercent: 0 });
+  // State for S&P 500 Historical Chart (from Marketstack)
+  const [sp500HistoricalData, setSp500HistoricalData] = useState([]);
+  
+  // State for Watchlist Bar Chart (from Finnhub)
+  const [watchlistData, setWatchlistData] = useState([]);
+
+  // States for Dynamic Portfolio Metrics (calculated using Finnhub quotes)
+  const [currentPortfolioValue, setCurrentPortfolioValue] = useState(0);
+  const [dayGainLoss, setDayGainLoss] = useState({ amount: 0, percentage: 0 });
+  const [dynamicPortfolioAllocationData, setDynamicPortfolioAllocationData] = useState([]);
+
+  // Placeholder states for other metrics
+  const [totalReturn, setTotalReturn] = useState({ amount: 25000, percentage: 25 });
+  const [totalMarketVolume, setTotalMarketVolume] = useState(0);
+  const [portfolioYield, setPortfolioYield] = useState(1.85);
+
+  // Loading and error states
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  // Define your watchlist and portfolio
+  const myWatchlistTickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA'];
+  const userPortfolio = [
+    { ticker: 'AAPL', shares: 10 },
+    { ticker: 'MSFT', shares: 5 },
+    { ticker: 'TSLA', shares: 8 },
+    { ticker: 'NVDA', shares: 3 },
+  ];
+
+  useEffect(() => {
+    let finnhubKeyMissing = !FINNHUB_API_KEY;
+    let marketstackKeyMissing = !MARKETSTACK_API_KEY;
+
+    if (finnhubKeyMissing || marketstackKeyMissing) {
+      let missingKeysMessage = "API key(s) missing: ";
+      if (finnhubKeyMissing) missingKeysMessage += "Finnhub ";
+      if (marketstackKeyMissing) missingKeysMessage += (finnhubKeyMissing ? "and " : "") + "Marketstack ";
+      missingKeysMessage += ". Please set them in your .env.local file.";
+      setError(missingKeysMessage);
+      setLoading(false);
+      return;
+    }
+
+    const fetchData = async () => {
+      setLoading(true);
+      setError(null); // Reset error on new fetch attempt
+      try {
+        // 1. Prepare list of unique tickers for Finnhub quotes
+        const portfolioTickers = userPortfolio.map(p => p.ticker);
+        const uniqueTickersToFetchFinnhub = Array.from(new Set(['SPY', ...myWatchlistTickers, ...portfolioTickers]));
+
+        // 2. Create Finnhub API call promises (for quotes)
+        const finnhubPromises = uniqueTickersToFetchFinnhub.map(ticker =>
+          fetch(`${FINNHUB_BASE_URL}/quote?symbol=${ticker}&token=${FINNHUB_API_KEY}`)
+            .then(res => {
+              if (!res.ok) {
+                console.error(`Finnhub: Failed to fetch quote for ${ticker}: ${res.status} ${res.statusText}`);
+                return { ticker, error: true, source: 'finnhub', status: res.status };
+              }
+              return res.json().then(quote => ({
+                ticker: ticker,
+                currentPrice: parseFloat((quote.c || 0).toFixed(2)),
+                dayChangeAbsolute: parseFloat((quote.d || 0).toFixed(2)),
+                dayChangePercent: parseFloat((quote.dp || 0).toFixed(2)),
+                previousClose: parseFloat((quote.pc || 0).toFixed(2)),
+                source: 'finnhub'
+              }));
+            }).catch(err => {
+                console.error(`Finnhub: Network error fetching ${ticker}: ${err.message}`);
+                return { ticker, error: true, source: 'finnhub', message: err.message };
+            })
+        );
+        
+        // 3. Create Marketstack API call promise (for SPY EOD history)
+        const today = new Date();
+        const yearAgo = new Date(new Date().setFullYear(today.getFullYear() - 1));
+        const dateTo = today.toISOString().split('T')[0];
+        const dateFrom = yearAgo.toISOString().split('T')[0];
+        
+        const marketstackSpyHistoryPromise = fetch(`${MARKETSTACK_BASE_URL}/eod?access_key=${MARKETSTACK_API_KEY}&symbols=SPY&date_from=${dateFrom}&date_to=${dateTo}&limit=365&sort=ASC`)
+          .then(res => {
+            if (!res.ok) {
+              // Try to parse error JSON from Marketstack
+              return res.json().then(errData => {
+                console.error(`Marketstack: Failed to fetch SPY EOD history: ${res.status}`, errData);
+                const message = errData?.error?.message || `HTTP error ${res.status}`;
+                throw new Error(`Marketstack SPY History Error: ${message}`);
+              }).catch(() => { // Fallback if error body isn't JSON or res.json() fails
+                console.error(`Marketstack: Failed to fetch SPY EOD history: ${res.status} ${res.statusText}`);
+                throw new Error(`Marketstack SPY History Error: ${res.status} ${res.statusText}`);
+              });
+            }
+            return res.json();
+          })
+          .then(data => {
+            if (data && data.data && Array.isArray(data.data)) {
+              return data.data.map(item => ({
+                date: item.date.split('T')[0], // Format to YYYY-MM-DD
+                value: parseFloat((item.close || 0).toFixed(2))
+              })).filter(item => item.date && !isNaN(item.value)); // Ensure valid data
+            }
+            console.warn("Marketstack SPY EOD history data not in expected format or empty:", data);
+            return [];
+          }).catch(err => { // Catch errors from the Marketstack promise chain
+            console.error("Error processing Marketstack SPY EOD history:", err.message);
+            setError(prev => prev ? `${prev}\n${err.message}` : err.message); // Append Marketstack error
+            return []; // Return empty array on error
+          });
+
+        // 4. Resolve all API call promises
+        const [resolvedFinnhubDataCollection, resolvedMarketstackSpyHistory] = await Promise.all([
+            Promise.all(finnhubPromises),
+            marketstackSpyHistoryPromise // This already handles its own errors and returns [] if failed
+        ]);
+        
+        // 5. Process Finnhub Data
+        const validFinnhubData = resolvedFinnhubDataCollection.filter(d => !d.error && d.source === 'finnhub');
+
+        const spyQuoteFinnhub = validFinnhubData.find(d => d.ticker === 'SPY');
+        if (spyQuoteFinnhub) {
+          setSp500CurrentDisplay({
+            value: spyQuoteFinnhub.currentPrice,
+            change: spyQuoteFinnhub.dayChangeAbsolute,
+            changePercent: spyQuoteFinnhub.dayChangePercent
+          });
+        } else {
+          console.warn("SPY quote data (Finnhub) could not be fetched or processed.");
+          setSp500CurrentDisplay({ value: 0, change: 0, changePercent: 0 }); // Default state
+        }
+
+        const currentWatchlistDisplayData = validFinnhubData.filter(d => myWatchlistTickers.includes(d.ticker));
+        setWatchlistData(currentWatchlistDisplayData);
+        
+        // Portfolio Calculations using Finnhub data
+        let calculatedPortfolioValue = 0;
+        let previousDayPortfolioValue = 0;
+        const portfolioHoldingsDetails = [];
+
+        for (const holding of userPortfolio) {
+          const quoteDataForHolding = validFinnhubData.find(q => q.ticker === holding.ticker);
+          if (quoteDataForHolding) {
+            calculatedPortfolioValue += holding.shares * quoteDataForHolding.currentPrice;
+            previousDayPortfolioValue += holding.shares * quoteDataForHolding.previousClose;
+            portfolioHoldingsDetails.push({
+              name: holding.ticker,
+              value: holding.shares * quoteDataForHolding.currentPrice
+            });
+          } else {
+            console.warn(`Finnhub quote data missing for portfolio holding: ${holding.ticker}. It will be excluded from portfolio calculations.`);
+          }
+        }
+        setCurrentPortfolioValue(parseFloat(calculatedPortfolioValue.toFixed(2)));
+        if (previousDayPortfolioValue > 0) {
+            const dayGainLossAmount = calculatedPortfolioValue - previousDayPortfolioValue;
+            const dayGainLossPercentage = (dayGainLossAmount / previousDayPortfolioValue) * 100;
+            setDayGainLoss({
+              amount: parseFloat(dayGainLossAmount.toFixed(2)),
+              percentage: parseFloat(dayGainLossPercentage.toFixed(2))
+            });
+        } else {
+             setDayGainLoss({ amount: 0, percentage: 0});
+        }
+        if (calculatedPortfolioValue > 0) {
+          const allocationData = portfolioHoldingsDetails.map(holding => ({
+            name: holding.name,
+            value: parseFloat(((holding.value / calculatedPortfolioValue) * 100).toFixed(2))
+          }));
+          setDynamicPortfolioAllocationData(allocationData);
+        } else {
+          setDynamicPortfolioAllocationData([]);
+        }
+        
+        // 6. Set Marketstack Data for historical chart
+        setSp500HistoricalData(resolvedMarketstackSpyHistory); // resolvedMarketstackSpyHistory is already [] on error
+
+      } catch (err) { // Catch errors from Promise.all for Finnhub or other general logic
+        console.error("Main Fetch/Calculation Error (useEffect):", err);
+        const errorMessage = err.message || "An unknown error occurred processing data.";
+        setError(prev => prev ? `${prev}\n${errorMessage}` : errorMessage);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchData();
+  }, []);
+
+  useCopilotReadable({
+    description: "Stock market dashboard data including S&P 500 current quote (Finnhub) and historical EOD trend (Marketstack), watchlist performance, dynamic portfolio metrics, and allocation.",
+    value: {
+      sp500HistoricalData, // From Marketstack
+      watchlistData, // From Finnhub
+      portfolioAllocationData: dynamicPortfolioAllocationData, // Calculated
+      metrics: {
+        currentPortfolioValue,
+        dayGainLossAmount: dayGainLoss.amount,
+        dayGainLossPercentage: dayGainLoss.percentage,
+        totalReturnAmount: totalReturn.amount,
+        totalReturnPercentage: totalReturn.percentage,
+        sp500Current: sp500CurrentDisplay.value, // From Finnhub quote
+        sp500Change: sp500CurrentDisplay.change,
+        sp500ChangePercent: sp500CurrentDisplay.changePercent,
+        totalMarketVolume,
+        portfolioYield,
+      }
+    }
+  });
+
+  useCopilotAction({
+    name: "searchInternet", available: "disabled", description: "Searches the internet.",
+    parameters: [ { name: "query", type: "string", description: "The query to search for.", required: true } ],
+    render: ({args, status}) => <SearchResults query={args.query || 'No query provided'} status={status} />
+  });
+
+  const colors = {
+    indexPerformance: ["#3b82f6", "#10b981"], // For SPY historical chart
+    watchlist: ["#8b5cf6", "#6366f1", "#4f46e5", "#7c3aed"],
+    portfolioAllocation: ["#3b82f6", "#64748b", "#10b981", "#f59e0b", "#ef4444", "#94a3b8"],
+    sectorPerformance: ["#059669", "#10b981", "#34d399", "#6ee7b7", "#a7f3d0"],
+    marketMovers: ["#10b981", "#34d399", "#ef4444", "#f87171"]
+  };
+
+  if (loading) {
+    return <div className="flex justify-center items-center h-screen"><p className="text-xl">Loading dashboard data...</p></div>;
+  }
+
+  // Display a consolidated error message if any API call failed
+  if (error) {
+    return <div className="flex flex-col justify-center items-center h-screen p-4">
+        <p className="text-xl text-red-500 mb-2">Error loading dashboard data:</p>
+        <pre className="text-sm text-red-400 whitespace-pre-wrap">{error}</pre>
+    </div>;
+  }
+  
+  return (
+    <div className="grid gap-4 grid-cols-1 md:grid-cols-2 lg:grid-cols-4 w-full">
+      {/* Key Stock Market Metrics */}
+      <div className="col-span-1 md:col-span-2 lg:col-span-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
+            <p className="text-xs text-gray-500">Portfolio Value</p>
+            <p className="text-xl font-semibold text-gray-900">${currentPortfolioValue.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+          </div>
+          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
+            <p className="text-xs text-gray-500">Day's Gain/Loss</p>
+            <p className={`text-xl font-semibold ${dayGainLoss.amount >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+              ${dayGainLoss.amount.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: 'always'})} 
+              ({dayGainLoss.percentage !== undefined ? dayGainLoss.percentage.toFixed(2) : '0.00'}%)
+            </p>
+          </div>
+          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
+            <p className="text-xs text-gray-500">S&P 500 (SPY Quote)</p>
+            <p className={`text-xl font-semibold ${sp500CurrentDisplay.change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+              {sp500CurrentDisplay.value.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+              <span className="text-sm ml-1">
+                ({sp500CurrentDisplay.change.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: 'always'})}, {sp500CurrentDisplay.changePercent.toFixed(2)}%)
+              </span>
+            </p>
+          </div>
+          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
+            <p className="text-xs text-gray-500">Total Return</p>
+            <p className={`text-xl font-semibold ${totalReturn.amount >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+              ${totalReturn.amount.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})} ({totalReturn.percentage.toFixed(2)}%)
+            </p>
+          </div>
+          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
+            <p className="text-xs text-gray-500">Market Volume</p>
+            <p className="text-xl font-semibold text-gray-900">{(totalMarketVolume / 1_000_000_000).toFixed(2)}B</p>
+          </div>
+          <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm">
+            <p className="text-xs text-gray-500">Portfolio Yield</p>
+            <p className="text-xl font-semibold text-gray-900">{portfolioYield.toFixed(2)}%</p>
+          </div>
+        </div>
+      </div>
+
+      {/* S&P 500 Historical AreaChart Card - Now using Marketstack data */}
+      <Card className="col-span-1 md:col-span-2 lg:col-span-4">
+        <CardHeader className="pb-1 pt-3">
+          <CardTitle className="text-base font-medium">S&P 500 Index Performance (SPY - EOD)</CardTitle>
+          <CardDescription className="text-xs">Historical End-of-Day trend from Marketstack</CardDescription>
+        </CardHeader>
+        <CardContent className="p-3">
+          <div className="h-60">
+            {sp500HistoricalData && sp500HistoricalData.length > 0 ? (
+              <AreaChart
+                data={sp500HistoricalData} 
+                index="date"
+                categories={["value"]} 
+                colors={colors.indexPerformance || ["#3b82f6"]}
+                valueFormatter={(value) => `$${value.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`}
+                showLegend={true} showGrid={true} showXAxis={true} showYAxis={true}
+              />
+            ) : (
+              <p className="text-center text-gray-500">
+                S&P 500 historical data not available or failed to load.
+              </p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Stock Watchlist - Dynamic */}
+      <Card className="col-span-1 md:col-span-1 lg:col-span-2">
+        <CardHeader className="pb-1 pt-3">
+          <CardTitle className="text-base font-medium">Stock Watchlist</CardTitle>
+          <CardDescription className="text-xs">Current price from Finnhub</CardDescription>
+        </CardHeader>
+        <CardContent className="p-3">
+          <div className="h-60">
+            {watchlistData.length > 0 ? (
+              <BarChart
+                data={watchlistData} 
+                index="ticker"
+                categories={["currentPrice"]}
+                colors={colors.watchlist}
+                valueFormatter={(value) => `$${value.toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2})}`}
+                showLegend={false} showGrid={true} layout="horizontal"
+              />
+            ) : (
+              <p className="text-center text-gray-500">No watchlist data available or all failed to load.</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Portfolio Allocation - Dynamic */}
+      <Card className="col-span-1 md:col-span-1 lg:col-span-2">
+        <CardHeader className="pb-1 pt-3">
+          <CardTitle className="text-base font-medium">Portfolio Allocation</CardTitle>
+          <CardDescription className="text-xs">Distribution by stock holdings</CardDescription>
+        </CardHeader>
+        <CardContent className="p-3">
+          <div className="h-60">
+            {dynamicPortfolioAllocationData && dynamicPortfolioAllocationData.length > 0 ? (
+              <DonutChart
+                data={dynamicPortfolioAllocationData}
+                category="value" 
+                index="name"
+                valueFormatter={(value) => `${value.toFixed(2)}%`}
+                colors={colors.portfolioAllocation}
+                centerText="Holdings" 
+                paddingAngle={2} 
+                showLabel={true} 
+                showLegend={true}
+                innerRadius={50} 
+                outerRadius="85%"
+              />
+            ) : (
+              <p className="text-center text-gray-500">No portfolio data to display allocation.</p>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Sector Performance - Placeholder */}
+      <Card className="col-span-1 md:col-span-1 lg:col-span-2">
+        <CardHeader className="pb-1 pt-3">
+          <CardTitle className="text-base font-medium">Sector Performance (Placeholder)</CardTitle>
+          <CardDescription className="text-xs">Performance by market sector</CardDescription>
+        </Header>
+        <CardContent className="p-3">
+          <div className="h-60 flex items-center justify-center text-gray-500">
+            <p>Sector performance data to be implemented.</p>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Market Movers - Placeholder */}
+      <Card className="col-span-1 md:col-span-1 lg:col-span-2">
+        <CardHeader className="pb-1 pt-3">
+          <CardTitle className="text-base font-medium">Market Movers (Placeholder)</CardTitle>
+          <CardDescription className="text-xs">Stocks with significant movement</CardDescription>
+        </Header>
+        <CardContent className="p-3">
+          <div className="h-60 flex items-center justify-center text-gray-500">
+            <p>Market movers data to be implemented.</p>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+y
+
